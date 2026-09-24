@@ -1,0 +1,210 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// Trainee — identity, owner of all other records
+// ─────────────────────────────────────────────
+model Trainee {
+  id    String @id @default(uuid()) @db.Uuid
+  name  String
+  email String @unique
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  submissions       Submission[]
+  activityLogs      ActivityLog[]
+  flagEvents        FlagEvent[]
+  typingTestResults TypingTestResult[]
+  journalResponses  JournalResponse[]
+  dayUnlocks        DayUnlock[]
+
+  @@map("trainee")
+}
+
+// ─────────────────────────────────────────────
+// Course — top-level curriculum tracks
+// ─────────────────────────────────────────────
+model Course {
+  id          String  @id @default(uuid()) @db.Uuid
+  title       String
+  description String?
+
+  curriculumDays CurriculumDay[]
+
+  @@map("course")
+}
+
+// ─────────────────────────────────────────────
+// CurriculumDay — days within a course
+// ─────────────────────────────────────────────
+model CurriculumDay {
+  id        String @id @default(uuid()) @db.Uuid
+  courseId  String @map("course_id") @db.Uuid
+  dayNumber Int    @map("day_number")
+  title     String
+
+  course Course @relation(fields: [courseId], references: [id])
+
+  tasks            Task[]
+  dayUnlocks       DayUnlock[]
+  journalResponses JournalResponse[]
+  activityLogs     ActivityLog[]
+
+  @@unique([courseId, dayNumber])
+  @@map("curriculum_day")
+}
+
+// ─────────────────────────────────────────────
+// Task — individual coding exercise within a day
+// ─────────────────────────────────────────────
+model Task {
+  id                   String  @id @default(uuid()) @db.Uuid
+  curriculumDayId      String  @map("curriculum_day_id") @db.Uuid
+  sequenceOrder        Int     @map("sequence_order")
+  title                String
+  instructionsMarkdown String  @map("instructions_markdown") @db.Text
+  isStretchGoal        Boolean @default(false) @map("is_stretch_goal")
+  timePermitted        Int?    @map("time_permitted") // minutes; null = untimed
+
+  curriculumDay CurriculumDay @relation(fields: [curriculumDayId], references: [id])
+
+  submissions Submission[]
+  flagEvents  FlagEvent[]
+
+  @@unique([curriculumDayId, sequenceOrder])
+  @@map("task")
+}
+
+// ─────────────────────────────────────────────
+// Submission — per-trainee, per-task completion + saved code (FR-5, FR-6)
+// ─────────────────────────────────────────────
+enum SubmissionStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  COMPLETED
+}
+
+model Submission {
+  id           String           @id @default(uuid()) @db.Uuid
+  traineeId    String           @map("trainee_id") @db.Uuid
+  taskId       String           @map("task_id") @db.Uuid
+  status       SubmissionStatus @default(NOT_STARTED)
+  fileContents Json             @map("file_contents") // { files: [{ path, content }] }
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+
+  trainee Trainee @relation(fields: [traineeId], references: [id])
+  task    Task    @relation(fields: [taskId], references: [id])
+
+  // One saved-code record per trainee per task — restores last state on reopen (FR-5)
+  @@unique([traineeId, taskId])
+  @@map("submission")
+}
+
+// ─────────────────────────────────────────────
+// ActivityLog — active/coding/reading time, per trainee per date (FR-13, FR-14, FR-16)
+// ─────────────────────────────────────────────
+model ActivityLog {
+  id              String   @id @default(uuid()) @db.Uuid
+  traineeId       String   @map("trainee_id") @db.Uuid
+  curriculumDayId String?  @map("curriculum_day_id") @db.Uuid
+  date            DateTime @db.Date
+  activeSeconds   Int      @default(0) @map("active_seconds")
+  codingSeconds   Int      @default(0) @map("coding_seconds")
+  readingSeconds  Int      @default(0) @map("reading_seconds")
+
+  trainee       Trainee        @relation(fields: [traineeId], references: [id])
+  curriculumDay CurriculumDay? @relation(fields: [curriculumDayId], references: [id])
+
+  // FR-16: daily_activity row keyed on (trainee_id, date) — one row per trainee per day,
+  // updated via periodic batches from POST /api/activity/time
+  @@unique([traineeId, date])
+  @@map("activity_log")
+}
+
+// ─────────────────────────────────────────────
+// FlagEvent — out-of-platform/integrity events for mentor review (FR-9, FR-11, FR-12, FR-18)
+// ─────────────────────────────────────────────
+enum FlagEventType {
+  FULLSCREEN_EXIT
+  TAB_SWITCH
+  PASTE_BLOCKED
+  UNAUTHORIZED_ACCESS_ATTEMPT
+}
+
+model FlagEvent {
+  id            String        @id @default(uuid()) @db.Uuid
+  traineeId     String        @map("trainee_id") @db.Uuid
+  taskId        String?       @map("task_id") @db.Uuid
+  type          FlagEventType
+  reviewPriority Int          @default(0) @map("review_priority") // severity-threshold filter (routine vs. review-worthy)
+  contextData   Json?         @map("context_data")
+  timestamp     DateTime      @default(now())
+
+  trainee Trainee @relation(fields: [traineeId], references: [id])
+  task    Task?   @relation(fields: [taskId], references: [id])
+
+  // FR-18: never queried by the trainee-facing API — mentor-review access only
+  @@map("flag_event")
+}
+
+// ─────────────────────────────────────────────
+// TypingTestResult — one row per completed test attempt (FR-15)
+// ─────────────────────────────────────────────
+model TypingTestResult {
+  id        String   @id @default(uuid()) @db.Uuid
+  traineeId String   @map("trainee_id") @db.Uuid
+  wpm       Decimal  @db.Decimal(5, 2)
+  accuracy  Decimal  @db.Decimal(5, 2) // percentage, e.g. 98.40
+  takenAt   DateTime @default(now()) @map("taken_at")
+
+  trainee Trainee @relation(fields: [traineeId], references: [id])
+
+  @@map("typing_test_result")
+}
+
+// ─────────────────────────────────────────────
+// JournalResponse — free-text answer per trainee per day (FR-19)
+// ─────────────────────────────────────────────
+model JournalResponse {
+  id              String   @id @default(uuid()) @db.Uuid
+  traineeId       String   @map("trainee_id") @db.Uuid
+  curriculumDayId String   @map("curriculum_day_id") @db.Uuid
+  responseText    String   @map("response_text") @db.Text
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  trainee       Trainee       @relation(fields: [traineeId], references: [id])
+  curriculumDay CurriculumDay @relation(fields: [curriculumDayId], references: [id])
+
+  // One journal entry per trainee per day — saved/updated in place, not appended (FR-19)
+  @@unique([traineeId, curriculumDayId])
+  @@map("journal_response")
+}
+
+// ─────────────────────────────────────────────
+// DayUnlock — the actual FR-1/FR-2/FR-3 gate: unlocked + completion state per trainee per day
+// ─────────────────────────────────────────────
+model DayUnlock {
+  id              String  @id @default(uuid()) @db.Uuid
+  traineeId       String  @map("trainee_id") @db.Uuid
+  curriculumDayId String  @map("curriculum_day_id") @db.Uuid
+  unlocked        Boolean @default(false)
+  isCompleted     Boolean @default(false) @map("is_completed")
+
+  trainee       Trainee       @relation(fields: [traineeId], references: [id])
+  curriculumDay CurriculumDay @relation(fields: [curriculumDayId], references: [id])
+
+  // is_completed sets true only when all checklist items for the day's tasks are checked (FR-2)
+  @@unique([traineeId, curriculumDayId])
+  @@map("day_unlock")
+}
